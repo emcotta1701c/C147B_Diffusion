@@ -28,8 +28,8 @@ class ConditionalDDPM(nn.Module):
         #       one dictionary containing the variance schedule
         #       $\beta_t$ along with other potentially useful constants.       
         
-        t_s = t_s.squeeze()
-        beta_t = torch.linspace(beta_1, beta_T, T)
+        t_s = t_s.squeeze() - 1
+        beta_t = torch.linspace(beta_1, beta_T, T, device=device)
         sqrt_beta_t = torch.sqrt(beta_t)
         alpha_t = 1 - beta_t
         oneover_sqrt_alpha = 1 / torch.sqrt(alpha_t)
@@ -75,14 +75,14 @@ class ConditionalDDPM(nn.Module):
         random_val = torch.rand(B, 1, device=device)
         mask = (random_val < self.modelconfig.mask_p).float()
         cemb = cemb * (1 - mask) + mask * self.modelconfig.condition_mask_value
-        t = torch.randint(1, self.modelconfig.T + 1, (B,)).float()
-        t = t / self.modelconfig.T  # normalize to [0,1]
-        eps = torch.randn_like(sample)
+        t = torch.randint(1, self.modelconfig.T + 1, (B,), device=device)
+        eps = torch.randn_like(images, device=device)
         scheduler_dict = self.scheduler(t)
-        sqrt_alpha_bar = scheduler_dict['sqrt_alpha_bar']
-        sqrt_oneminus_alpha_bar = scheduler_dict['sqrt_oneminus_alpha_bar']
-        x_t = sqrt_alpha_bar * sample + sqrt_oneminus_alpha_bar * eps
-        noise_loss = self.loss_fn(self.network(x_t, t, cemb_sample) - eps)
+        t = t / self.modelconfig.T
+        sqrt_alpha_bar = scheduler_dict['sqrt_alpha_bar'].view(B, 1, 1, 1)
+        sqrt_oneminus_alpha_bar = scheduler_dict['sqrt_oneminus_alpha_bar'].view(B, 1, 1, 1)
+        x_t = sqrt_alpha_bar * images + sqrt_oneminus_alpha_bar * eps
+        noise_loss = self.loss_fn(self.network(x_t, t, cemb), eps)
         
         # pass
 
@@ -104,25 +104,27 @@ class ConditionalDDPM(nn.Module):
         #       omega: conditional guidance weight.
         #   Outputs:
         #       generated_images  
-
-        B = conditions.shape[0]
-        X_T = torch.randn(B, self.modelconfig.num_channels, self.modelconfig.input_dim, self.modelconfig.input_dim)
-        for t in range(T, 0, -1):
-            t_batch = torch.full((B, 1), t)
-            t_normalized = t_batch / self.modelconfig.T
-            z = torch.zeros_like(X_T)
-            if t > 1:
-                z = torch.randn_like(X_T)
-            eps_t = (1+omega) * self.network(X_T, t_normalized, conditions) - omega * self.network(x_T, t_normalized)
-            schedule = self.scheduler(t_batch)
-            
-            oneover_sqrt_alpha = schedule['oneover_sqrt_alpha']
-            oneminus_alpha = 1 - schedule['alpha_t']
-            sqrt_oneminus_alpha_bar = schedule['sqrt_oneminus_alpha_bar']
-            sigma_t = schedule['sqrt_beta_t']
-            x_tminus1 = schedule['oneover_sqrt_alpha'] * (X_T - oneminus_alpha / sqrt_oneminus_alpha_bar * eps_t) + sigma_t * z
-            
-            X_T = x_tminus1
+        with torch.no_grad():
+            B = conditions.shape[0]
+            cemb = F.one_hot(conditions, num_classes=self.modelconfig.num_classes).float()
+            X_t = torch.randn(B, self.modelconfig.num_channels, self.modelconfig.input_dim, self.modelconfig.input_dim, device=device)
+            cemb_null = torch.full((B,self.modelconfig.num_classes), self.modelconfig.condition_mask_value, device=device)
+            for t in range(T, 0, -1):
+                t_batch = torch.full((B, 1), t, device=device)
+                t_normalized = t_batch / self.modelconfig.T
+                z = torch.zeros_like(X_t, device=device)
+                if t > 1:
+                    z = torch.randn_like(X_t, device=device)
+                eps_t = (1+omega) * self.network(X_t, t_normalized, cemb) - omega * self.network(X_t, t_normalized, cemb_null)
+                schedule = self.scheduler(t_batch)
+                
+                oneover_sqrt_alpha = schedule['oneover_sqrt_alpha'].view(B, 1, 1, 1)
+                oneminus_alpha = 1 - schedule['alpha_t'].view(B, 1, 1, 1)
+                sqrt_oneminus_alpha_bar = schedule['sqrt_oneminus_alpha_bar'].view(B, 1, 1, 1)
+                sigma_t = schedule['sqrt_beta_t'].view(B, 1, 1, 1)
+                x_tminus1 = oneover_sqrt_alpha * (X_t - oneminus_alpha / sqrt_oneminus_alpha_bar * eps_t) + sigma_t * z
+                
+                X_t = x_tminus1
             
         # pass
 

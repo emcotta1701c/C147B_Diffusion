@@ -35,15 +35,16 @@ class ConditionalFM(nn.Module):
         # pass
 
         B = images.shape[0]
-        x_0 = np.randn_like(images)
+        x_0 = torch.randn_like(images, device=device)
         cemb = F.one_hot(conditions, num_classes=self.modelconfig.num_classes).float()
         random_val = torch.rand(B, 1, device=device)
         mask = (random_val < self.modelconfig.mask_p).float()
         cemb = cemb * (1 - mask) + mask * self.modelconfig.condition_mask_value
-        t = np.rand(B)
-        x_t = (1-t) * x_0 + t * images
+        t = torch.rand(B, device=device)
+        t_view = t.view(B, 1, 1, 1)
+        x_t = (1-t_view) * x_0 + t_view * images
         u_t = images - x_0
-        loss = self.loss_fn(self.network(x_t, t, cemb) - u_t)
+        loss = self.loss_fn(self.network(x_t, t, cemb), u_t)
 
         # ==================================================== #
         return loss
@@ -62,15 +63,19 @@ class ConditionalFM(nn.Module):
         #       generated_images  
 
         # pass
-        
-        B = conditions.shape[0]
-        output_shape = (B, self.modelconfig.num_channels, self.modelconfig.input_dim, self.modelconfig.input_dim)
-        x = np.randn(output_shape)
-        delta_t = 1 / self.modelconfig.T
-        for k in range(0, self.modelconfig.T):
-            t_k = torch.full((B,1), k * delta_t)
-            v_t = (1 + omega) * self.network(x, t_k, conditons) - omega * self.network(x, t_k)
-            x = x + delta_t * v_t
+        with torch.no_grad():
+            B = conditions.shape[0]
+            output_shape = (B, self.modelconfig.num_channels, self.modelconfig.input_dim, self.modelconfig.input_dim)
+            x = torch.randn(output_shape, device=device)
+            delta_t = 1 / self.modelconfig.T
+            conditions = F.one_hot(conditions, self.modelconfig.num_classes).float()
+            cemb_null = torch.full((B, self.modelconfig.num_classes), 
+                                self.modelconfig.condition_mask_value, 
+                                device=device).float()
+            for k in range(0, self.modelconfig.T):
+                t_k = torch.full((B,1), k * delta_t, device=device)
+                v_t = (1 + omega) * self.network(x, t_k, conditions) - omega * self.network(x, t_k, cemb_null)
+                x = x + delta_t * v_t
 
 
         # ==================================================== #
